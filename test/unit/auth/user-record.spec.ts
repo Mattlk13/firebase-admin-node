@@ -1,4 +1,5 @@
 /*!
+ * @license
  * Copyright 2017 Google Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,7 +19,7 @@ import * as chai from 'chai';
 import * as sinonChai from 'sinon-chai';
 import * as chaiAsPromised from 'chai-as-promised';
 
-import {deepCopy} from '../../../src/utils/deep-copy';
+import { deepCopy } from '../../../src/utils/deep-copy';
 import {
   UserInfo, UserMetadata, UserRecord, GetAccountInfoUserResponse, ProviderUserInfoResponse,
   MultiFactor, PhoneMultiFactorInfo, MultiFactorInfo, MultiFactorInfoResponse,
@@ -173,7 +174,7 @@ function getUserJSON(tenantId?: string): object {
         },
         {
           uid: 'enrollmentId2',
-          displayName: null,
+          displayName: undefined,
           enrollmentTime: now.toUTCString(),
           phoneNumber: '+16505556789',
           factorId: 'phone',
@@ -294,7 +295,7 @@ describe('PhoneMultiFactorInfo', () => {
   describe('getters', () => {
     it('should set missing optional fields to null', () => {
       expect(phoneMultiFactorInfoMissingFields.uid).to.equal(serverResponse.mfaEnrollmentId);
-      expect(phoneMultiFactorInfoMissingFields.displayName).to.be.null;
+      expect(phoneMultiFactorInfoMissingFields.displayName).to.be.undefined;
       expect(phoneMultiFactorInfoMissingFields.phoneNumber).to.equal(serverResponse.phoneInfo);
       expect(phoneMultiFactorInfoMissingFields.enrollmentTime).to.be.null;
       expect(phoneMultiFactorInfoMissingFields.factorId).to.equal('phone');
@@ -365,7 +366,7 @@ describe('PhoneMultiFactorInfo', () => {
     it('should return expected JSON object with missing fields set to null', () => {
       expect(phoneMultiFactorInfoMissingFields.toJSON()).to.deep.equal({
         uid: 'enrollmentId1',
-        displayName: null,
+        displayName: undefined,
         enrollmentTime: null,
         phoneNumber: '+16505551234',
         factorId: 'phone',
@@ -515,19 +516,19 @@ describe('UserInfo', () => {
 
     it('should succeed when rawId and providerId are both provided', () => {
       expect(() => {
-        return new UserInfo({providerId: 'google.com', rawId: '1234567890'});
+        return new UserInfo({ providerId: 'google.com', rawId: '1234567890' });
       }).not.to.throw(Error);
     });
 
     it('should throw when only rawId is provided', () => {
       expect(() =>  {
-        return new UserInfo({rawId: '1234567890'} as any);
+        return new UserInfo({ rawId: '1234567890' } as any);
       }).to.throw(Error);
     });
 
     it('should throw when only providerId is provided', () => {
       expect(() =>  {
-        return new UserInfo({providerId: 'google.com'} as any);
+        return new UserInfo({ providerId: 'google.com' } as any);
       }).to.throw(Error);
     });
   });
@@ -616,10 +617,12 @@ describe('UserInfo', () => {
 describe('UserMetadata', () => {
   const expectedLastLoginAt = 1476235905000;
   const expectedCreatedAt = 1476136676000;
+  const expectedLastRefreshAt = '2016-10-12T01:31:45.000Z';
   const actualMetadata: UserMetadata = new UserMetadata({
     localId: 'uid123',
     lastLoginAt: expectedLastLoginAt.toString(),
     createdAt: expectedCreatedAt.toString(),
+    lastRefreshAt: expectedLastRefreshAt,
   });
   const expectedMetadataJSON = {
     lastSignInTime: new Date(expectedLastLoginAt).toUTCString(),
@@ -629,7 +632,7 @@ describe('UserMetadata', () => {
   describe('constructor', () =>  {
     it('should initialize as expected when a valid creationTime is provided', () => {
       expect(() => {
-        return new UserMetadata({createdAt: '1476136676000'} as any);
+        return new UserMetadata({ createdAt: '1476136676000' } as any);
       }).not.to.throw(Error);
     });
 
@@ -676,6 +679,10 @@ describe('UserMetadata', () => {
         (actualMetadata as any).creationTime = new Date();
       }).to.throw(Error);
     });
+
+    it('should return expected lastRefreshTime', () => {
+      expect(actualMetadata.lastRefreshTime).to.equal(new Date(expectedLastRefreshAt).toUTCString())
+    });
   });
 
   describe('toJSON', () => {
@@ -695,7 +702,7 @@ describe('UserRecord', () => {
 
     it('should succeed when only localId is provided', () => {
       expect(() =>  {
-        return new UserRecord({localId: '123456789'});
+        return new UserRecord({ localId: '123456789' });
       }).not.to.throw(Error);
     });
   });
@@ -843,7 +850,7 @@ describe('UserRecord', () => {
 
     it('should throw when modifying readonly customClaims property', () => {
       expect(() => {
-        (userRecord as any).customClaims = {admin: false};
+        (userRecord as any).customClaims = { admin: false };
       }).to.throw(Error);
     });
 

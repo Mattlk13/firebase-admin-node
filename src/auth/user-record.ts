@@ -1,4 +1,5 @@
 /*!
+ * @license
  * Copyright 2017 Google Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,10 +15,18 @@
  * limitations under the License.
  */
 
-import {deepCopy} from '../utils/deep-copy';
-import {isNonNullObject} from '../utils/validator';
+import { deepCopy } from '../utils/deep-copy';
+import { isNonNullObject } from '../utils/validator';
 import * as utils from '../utils';
-import {AuthClientErrorCode, FirebaseAuthError} from '../utils/error';
+import { AuthClientErrorCode, FirebaseAuthError } from '../utils/error';
+import { auth } from './index';
+
+import MultiFactorInfoInterface = auth.MultiFactorInfo;
+import PhoneMultiFactorInfoInterface = auth.PhoneMultiFactorInfo;
+import MultiFactorSettings = auth.MultiFactorSettings;
+import UserMetadataInterface = auth.UserMetadata;
+import UserInfoInterface = auth.UserInfo;
+import UserRecordInterface = auth.UserRecord;
 
 /**
  * 'REDACTED', encoded as a base64 string.
@@ -40,64 +49,6 @@ function parseDate(time: any): string | null {
     // Do nothing. null will be returned.
   }
   return null;
-}
-
-/**
- * Interface representing base properties of a user enrolled second factor for a
- * `CreateRequest`.
- */
-export interface CreateMultiFactorInfoRequest {
-  displayName?: string;
-  factorId: string;
-}
-
-/**
- * Interface representing a phone specific user enrolled second factor for a
- * `CreateRequest`.
- */
-export interface CreatePhoneMultiFactorInfoRequest extends CreateMultiFactorInfoRequest {
-  phoneNumber: string;
-}
-
-/**
- * Interface representing common properties of a user enrolled second factor
- * for an `UpdateRequest`.
- */
-export interface UpdateMultiFactorInfoRequest {
-  uid?: string;
-  displayName?: string;
-  enrollmentTime?: string;
-  factorId: string;
-}
-
-/**
- * Interface representing a phone specific user enrolled second factor
- * for an `UpdateRequest`.
- */
-export interface UpdatePhoneMultiFactorInfoRequest extends UpdateMultiFactorInfoRequest {
-  phoneNumber: string;
-}
-
-/** Parameters for update user operation */
-export interface UpdateRequest {
-  disabled?: boolean;
-  displayName?: string | null;
-  email?: string;
-  emailVerified?: boolean;
-  password?: string;
-  phoneNumber?: string | null;
-  photoURL?: string | null;
-  multiFactor?: {
-    enrolledFactors: UpdateMultiFactorInfoRequest[] | null;
-  };
-}
-
-/** Parameters for create user operation */
-export interface CreateRequest extends UpdateRequest {
-  uid?: string;
-  multiFactor?: {
-    enrolledFactors: CreateMultiFactorInfoRequest[];
-  };
 }
 
 export interface MultiFactorInfoResponse {
@@ -138,19 +89,18 @@ export interface GetAccountInfoUserResponse {
   [key: string]: any;
 }
 
-/** Enums for multi-factor identifiers. */
-export enum MultiFactorId {
+enum MultiFactorId {
   Phone = 'phone',
 }
 
 /**
  * Abstract class representing a multi-factor info interface.
  */
-export abstract class MultiFactorInfo {
+export abstract class MultiFactorInfo implements MultiFactorInfoInterface {
   public readonly uid: string;
-  public readonly displayName: string | null;
-  public readonly factorId: MultiFactorId;
-  public readonly enrollmentTime: string;
+  public readonly displayName?: string;
+  public readonly factorId: string;
+  public readonly enrollmentTime?: string;
 
   /**
    * Initializes the MultiFactorInfo associated subclass using the server side.
@@ -197,7 +147,7 @@ export abstract class MultiFactorInfo {
    * @return The multi-factor ID associated with the provided response. If the response is
    *     not associated with any known multi-factor ID, null is returned.
    */
-  protected abstract getFactorId(response: MultiFactorInfoResponse): MultiFactorId | null;
+  protected abstract getFactorId(response: MultiFactorInfoResponse): string | null;
 
   /**
    * Initializes the MultiFactorInfo object using the provided server response.
@@ -213,7 +163,7 @@ export abstract class MultiFactorInfo {
     }
     utils.addReadonlyGetter(this, 'uid', response.mfaEnrollmentId);
     utils.addReadonlyGetter(this, 'factorId', factorId);
-    utils.addReadonlyGetter(this, 'displayName', response.displayName || null);
+    utils.addReadonlyGetter(this, 'displayName', response.displayName);
     // Encoded using [RFC 3339](https://www.ietf.org/rfc/rfc3339.txt) format.
     // For example, "2017-01-15T01:30:15.01Z".
     // This can be parsed directly via Date constructor.
@@ -228,7 +178,7 @@ export abstract class MultiFactorInfo {
 }
 
 /** Class representing a phone MultiFactorInfo object. */
-export class PhoneMultiFactorInfo extends MultiFactorInfo {
+export class PhoneMultiFactorInfo extends MultiFactorInfo implements PhoneMultiFactorInfoInterface {
   public readonly phoneNumber: string;
 
   /**
@@ -258,14 +208,14 @@ export class PhoneMultiFactorInfo extends MultiFactorInfo {
    * @return The multi-factor ID associated with the provided response. If the response is
    *     not associated with any known multi-factor ID, null is returned.
    */
-  protected getFactorId(response: MultiFactorInfoResponse): MultiFactorId | null {
+  protected getFactorId(response: MultiFactorInfoResponse): string | null {
     return (response && response.phoneInfo) ? MultiFactorId.Phone : null;
   }
 }
 
 /** Class representing multi-factor related properties of a user. */
-export class MultiFactor {
-  public readonly enrolledFactors: ReadonlyArray<MultiFactorInfo>;
+export class MultiFactor implements MultiFactorSettings {
+  public enrolledFactors: MultiFactorInfo[];
 
   /**
    * Initializes the MultiFactor object using the server side or JWT format response.
@@ -308,9 +258,16 @@ export class MultiFactor {
  *     endpoint.
  * @constructor
  */
-export class UserMetadata {
+export class UserMetadata implements UserMetadataInterface {
   public readonly creationTime: string;
   public readonly lastSignInTime: string;
+
+  /**
+   * The time at which the user was last active (ID token refreshed), or null
+   * if the user was never active. Formatted as a UTC Date string (eg
+   * 'Sat, 03 Feb 2001 04:05:06 GMT')
+   */
+  public readonly lastRefreshTime: string | null;
 
   constructor(response: GetAccountInfoUserResponse) {
     // Creation date should always be available but due to some backend bugs there
@@ -319,6 +276,8 @@ export class UserMetadata {
     // These bugs have already been addressed since then.
     utils.addReadonlyGetter(this, 'creationTime', parseDate(response.createdAt));
     utils.addReadonlyGetter(this, 'lastSignInTime', parseDate(response.lastLoginAt));
+    const lastRefreshAt = response.lastRefreshAt ? new Date(response.lastRefreshAt).toUTCString() : null;
+    utils.addReadonlyGetter(this, 'lastRefreshTime', lastRefreshAt);
   }
 
   /** @return The plain object representation of the user's metadata. */
@@ -338,7 +297,7 @@ export class UserMetadata {
  *     endpoint.
  * @constructor
  */
-export class UserInfo {
+export class UserInfo implements UserInfoInterface {
   public readonly uid: string;
   public readonly displayName: string;
   public readonly email: string;
@@ -383,7 +342,7 @@ export class UserInfo {
  *     endpoint.
  * @constructor
  */
-export class UserRecord {
+export class UserRecord implements UserRecordInterface {
   public readonly uid: string;
   public readonly email: string;
   public readonly emailVerified: boolean;
@@ -395,7 +354,7 @@ export class UserRecord {
   public readonly providerData: UserInfo[];
   public readonly passwordHash?: string;
   public readonly passwordSalt?: string;
-  public readonly customClaims: object;
+  public readonly customClaims: {[key: string]: any};
   public readonly tenantId?: string | null;
   public readonly tokensValidAfterTime?: string;
   public readonly multiFactor?: MultiFactor;

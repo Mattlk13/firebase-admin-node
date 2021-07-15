@@ -1,4 +1,5 @@
 /*!
+ * @license
  * Copyright 2017 Google Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,35 +15,22 @@
  * limitations under the License.
  */
 
-import {FirebaseApp} from '../firebase-app';
-import {FirebaseError} from '../utils/error';
-import {FirebaseServiceInterface, FirebaseServiceInternalsInterface} from '../firebase-service';
-import {ServiceAccountCredential, isApplicationDefault} from '../auth/credential';
-import {Bucket, Storage as StorageClient} from '@google-cloud/storage';
-
+import { FirebaseApp } from '../firebase-app';
+import { FirebaseError } from '../utils/error';
+import { ServiceAccountCredential, isApplicationDefault } from '../credential/credential-internal';
+import { Bucket, Storage as StorageClient } from '@google-cloud/storage';
 import * as utils from '../utils/index';
 import * as validator from '../utils/validator';
+import { storage } from './index';
+
+import StorageInterface  = storage.Storage;
 
 /**
- * Internals of a Storage instance.
+ * The default `Storage` service if no
+ * app is provided or the `Storage` service associated with the provided
+ * app.
  */
-class StorageInternals implements FirebaseServiceInternalsInterface {
-  /**
-   * Deletes the service and its associated resources.
-   *
-   * @return {Promise<()>} An empty Promise that will be fulfilled when the service is deleted.
-   */
-  public delete(): Promise<void> {
-    // There are no resources to clean up.
-    return Promise.resolve();
-  }
-}
-
-/**
- * Storage service bound to the provided app.
- */
-export class Storage implements FirebaseServiceInterface {
-  public readonly INTERNAL: StorageInternals = new StorageInternals();
+export class Storage implements StorageInterface {
 
   private readonly appInternal: FirebaseApp;
   private readonly storageClient: StorageClient;
@@ -50,6 +38,7 @@ export class Storage implements FirebaseServiceInterface {
   /**
    * @param {FirebaseApp} app The app for this Storage service.
    * @constructor
+   * @internal
    */
   constructor(app: FirebaseApp) {
     if (!validator.isNonNullObject(app) || !('options' in app)) {
@@ -59,6 +48,19 @@ export class Storage implements FirebaseServiceInterface {
       });
     }
 
+    if (!process.env.STORAGE_EMULATOR_HOST && process.env.FIREBASE_STORAGE_EMULATOR_HOST) {
+      const firebaseStorageEmulatorHost = process.env.FIREBASE_STORAGE_EMULATOR_HOST;
+
+      if (firebaseStorageEmulatorHost.match(/https?:\/\//)) {
+        throw new FirebaseError({
+          code: 'storage/invalid-emulator-host',
+          message: 'FIREBASE_STORAGE_EMULATOR_HOST should not contain a protocol (http or https).',
+        });
+      }
+
+      process.env.STORAGE_EMULATOR_HOST = `http://${process.env.FIREBASE_STORAGE_EMULATOR_HOST}`;
+    }
+    
     let storage: typeof StorageClient;
     try {
       storage = require('@google-cloud/storage').Storage;
@@ -98,12 +100,10 @@ export class Storage implements FirebaseServiceInterface {
   }
 
   /**
-   * Returns a reference to a Google Cloud Storage bucket. Returned reference can be used to upload
-   * and download content from Google Cloud Storage.
-   *
-   * @param {string=} name Optional name of the bucket to be retrieved. If name is not specified,
-   *   retrieves a reference to the default bucket.
-   * @return {Bucket} A Bucket object from the @google-cloud/storage library.
+   * @param name Optional name of the bucket to be retrieved. If name is not specified,
+   * retrieves a reference to the default bucket.
+   * @returns A [Bucket](https://cloud.google.com/nodejs/docs/reference/storage/latest/Bucket)
+   * instance as defined in the `@google-cloud/storage` package.
    */
   public bucket(name?: string): Bucket {
     const bucketName = (typeof name !== 'undefined')
@@ -120,9 +120,7 @@ export class Storage implements FirebaseServiceInterface {
   }
 
   /**
-   * Returns the app associated with this Storage instance.
-   *
-   * @return {FirebaseApp} The app associated with this Storage instance.
+   * @return The app associated with this Storage instance.
    */
   get app(): FirebaseApp {
     return this.appInternal;

@@ -14,19 +14,20 @@
  * limitations under the License.
  */
 
-import {AuthClientErrorCode, FirebaseAuthError, ErrorInfo} from '../utils/error';
-
+import { AuthClientErrorCode, FirebaseAuthError, ErrorInfo } from '../utils/error';
 import * as util from '../utils/index';
 import * as validator from '../utils/validator';
-import * as jwt from 'jsonwebtoken';
-import { HttpClient, HttpRequestConfig, HttpError } from '../utils/api-request';
-import { DecodedIdToken } from './auth';
+import { 
+  DecodedToken, decodeJwt, JwtError, JwtErrorCode,
+  EmulatorSignatureVerifier, PublicKeySignatureVerifier, ALGORITHM_RS256, SignatureVerifier,
+} from '../utils/jwt';
 import { FirebaseApp } from '../firebase-app';
+import { auth } from './index';
+
+import DecodedIdToken = auth.DecodedIdToken;
 
 // Audience to use for Firebase Auth Custom tokens
 const FIREBASE_AUDIENCE = 'https://identitytoolkit.googleapis.com/google.identity.identitytoolkit.v1.IdentityToolkit';
-
-export const ALGORITHM_RS256 = 'RS256';
 
 // URL containing the public keys for the Google certs (whose private keys are used to sign Firebase
 // Auth ID tokens)
@@ -34,6 +35,8 @@ const CLIENT_CERT_URL = 'https://www.googleapis.com/robot/v1/metadata/x509/secur
 
 // URL containing the public keys for Firebase session cookies. This will be updated to a different URL soon.
 const SESSION_COOKIE_CERT_URL = 'https://www.googleapis.com/identitytoolkit/v3/relyingparty/publicKeys';
+
+const EMULATOR_VERIFIER = new EmulatorSignatureVerifier();
 
 /** User facing token information related to the Firebase ID token. */
 export const ID_TOKEN_INFO: FirebaseTokenInfo = {
@@ -68,63 +71,60 @@ export interface FirebaseTokenInfo {
 }
 
 /**
- * Class for verifying general purpose Firebase JWTs. This verifies ID tokens and session cookies.
+ * Class for verifying ID tokens and session cookies.
  */
 export class FirebaseTokenVerifier {
-  private publicKeys: {[key: string]: string};
-  private publicKeysExpireAt: number;
   private readonly shortNameArticle: string;
+  private readonly signatureVerifier: SignatureVerifier;
 
-  constructor(private clientCertUrl: string, private algorithm: string,
-              private issuer: string, private tokenInfo: FirebaseTokenInfo,
+  constructor(clientCertUrl: string, private issuer: string, private tokenInfo: FirebaseTokenInfo,
               private readonly app: FirebaseApp) {
+
     if (!validator.isURL(clientCertUrl)) {
       throw new FirebaseAuthError(
         AuthClientErrorCode.INVALID_ARGUMENT,
-        `The provided public client certificate URL is an invalid URL.`,
-      );
-    } else if (!validator.isNonEmptyString(algorithm)) {
-      throw new FirebaseAuthError(
-        AuthClientErrorCode.INVALID_ARGUMENT,
-        `The provided JWT algorithm is an empty string.`,
+        'The provided public client certificate URL is an invalid URL.',
       );
     } else if (!validator.isURL(issuer)) {
       throw new FirebaseAuthError(
         AuthClientErrorCode.INVALID_ARGUMENT,
-        `The provided JWT issuer is an invalid URL.`,
+        'The provided JWT issuer is an invalid URL.',
       );
     } else if (!validator.isNonNullObject(tokenInfo)) {
       throw new FirebaseAuthError(
         AuthClientErrorCode.INVALID_ARGUMENT,
-        `The provided JWT information is not an object or null.`,
+        'The provided JWT information is not an object or null.',
       );
     } else if (!validator.isURL(tokenInfo.url)) {
       throw new FirebaseAuthError(
         AuthClientErrorCode.INVALID_ARGUMENT,
-        `The provided JWT verification documentation URL is invalid.`,
+        'The provided JWT verification documentation URL is invalid.',
       );
     } else if (!validator.isNonEmptyString(tokenInfo.verifyApiName)) {
       throw new FirebaseAuthError(
         AuthClientErrorCode.INVALID_ARGUMENT,
-        `The JWT verify API name must be a non-empty string.`,
+        'The JWT verify API name must be a non-empty string.',
       );
     } else if (!validator.isNonEmptyString(tokenInfo.jwtName)) {
       throw new FirebaseAuthError(
         AuthClientErrorCode.INVALID_ARGUMENT,
-        `The JWT public full name must be a non-empty string.`,
+        'The JWT public full name must be a non-empty string.',
       );
     } else if (!validator.isNonEmptyString(tokenInfo.shortName)) {
       throw new FirebaseAuthError(
         AuthClientErrorCode.INVALID_ARGUMENT,
-        `The JWT public short name must be a non-empty string.`,
+        'The JWT public short name must be a non-empty string.',
       );
     } else if (!validator.isNonNullObject(tokenInfo.expiredErrorCode) || !('code' in tokenInfo.expiredErrorCode)) {
       throw new FirebaseAuthError(
         AuthClientErrorCode.INVALID_ARGUMENT,
-        `The JWT expiration error code must be a non-null ErrorInfo object.`,
+        'The JWT expiration error code must be a non-null ErrorInfo object.',
       );
     }
     this.shortNameArticle = tokenInfo.shortName.charAt(0).match(/[aeiou]/i) ? 'an' : 'a';
+
+    this.signatureVerifier =
+      PublicKeySignatureVerifier.withCertificateUrl(clientCertUrl, app.options.httpAgent);
 
     // For backward compatibility, the project ID is validated in the verification call.
   }
@@ -132,11 +132,11 @@ export class FirebaseTokenVerifier {
   /**
    * Verifies the format and signature of a Firebase Auth JWT token.
    *
-   * @param {string} jwtToken The Firebase Auth JWT token to verify.
-   * @return {Promise<DecodedIdToken>} A promise fulfilled with the decoded claims of the Firebase Auth ID
-   *                           token.
+   * @param jwtToken The Firebase Auth JWT token to verify.
+   * @param isEmulator Whether to accept Auth Emulator tokens.
+   * @return A promise fulfilled with the decoded claims of the Firebase Auth ID token.
    */
-  public verifyJWT(jwtToken: string): Promise<DecodedIdToken> {
+  public verifyJWT(jwtToken: string, isEmulator = false): Promise<DecodedIdToken> {
     if (!validator.isString(jwtToken)) {
       throw new FirebaseAuthError(
         AuthClientErrorCode.INVALID_ARGUMENT,
@@ -144,38 +144,78 @@ export class FirebaseTokenVerifier {
       );
     }
 
-    return util.findProjectId(this.app)
+    return this.ensureProjectId()
       .then((projectId) => {
-        return this.verifyJWTWithProjectId(jwtToken, projectId);
+        return this.decodeAndVerify(jwtToken, projectId, isEmulator);
+      })
+      .then((decoded) => {
+        const decodedIdToken = decoded.payload as DecodedIdToken;
+        decodedIdToken.uid = decodedIdToken.sub;
+        return decodedIdToken;
       });
   }
 
-  private verifyJWTWithProjectId(jwtToken: string, projectId: string | null): Promise<DecodedIdToken> {
-    if (!validator.isNonEmptyString(projectId)) {
-      throw new FirebaseAuthError(
-        AuthClientErrorCode.INVALID_CREDENTIAL,
-        `Must initialize app with a cert credential or set your Firebase project ID as the ` +
-        `GOOGLE_CLOUD_PROJECT environment variable to call ${this.tokenInfo.verifyApiName}.`,
-      );
-    }
+  private ensureProjectId(): Promise<string> {
+    return util.findProjectId(this.app)
+      .then((projectId) => {
+        if (!validator.isNonEmptyString(projectId)) {
+          throw new FirebaseAuthError(
+            AuthClientErrorCode.INVALID_CREDENTIAL,
+            'Must initialize app with a cert credential or set your Firebase project ID as the ' +
+            `GOOGLE_CLOUD_PROJECT environment variable to call ${this.tokenInfo.verifyApiName}.`,
+          );
+        }
+        return Promise.resolve(projectId);
+      })
+  }
 
-    const fullDecodedToken: any = jwt.decode(jwtToken, {
-      complete: true,
-    });
+  private decodeAndVerify(token: string, projectId: string, isEmulator: boolean): Promise<DecodedToken> {
+    return this.safeDecode(token)
+      .then((decodedToken) => {
+        this.verifyContent(decodedToken, projectId, isEmulator);
+        return this.verifySignature(token, isEmulator)
+          .then(() => decodedToken);
+      });
+  }
 
+  private safeDecode(jwtToken: string): Promise<DecodedToken> {
+    return decodeJwt(jwtToken)
+      .catch((err: JwtError) => {
+        if (err.code == JwtErrorCode.INVALID_ARGUMENT) {
+          const verifyJwtTokenDocsMessage = ` See ${this.tokenInfo.url} ` +
+            `for details on how to retrieve ${this.shortNameArticle} ${this.tokenInfo.shortName}.`;
+          const errorMessage = `Decoding ${this.tokenInfo.jwtName} failed. Make sure you passed ` +
+            `the entire string JWT which represents ${this.shortNameArticle} ` +
+            `${this.tokenInfo.shortName}.` + verifyJwtTokenDocsMessage;
+          throw new FirebaseAuthError(AuthClientErrorCode.INVALID_ARGUMENT,
+            errorMessage);
+        }
+        throw new FirebaseAuthError(AuthClientErrorCode.INTERNAL_ERROR, err.message);
+      });
+  }
+
+  /**
+   * Verifies the content of a Firebase Auth JWT.
+   *
+   * @param fullDecodedToken The decoded JWT.
+   * @param projectId The Firebase Project Id.
+   * @param isEmulator Whether the token is an Emulator token.
+   */
+  private verifyContent(
+    fullDecodedToken: DecodedToken,
+    projectId: string | null,
+    isEmulator: boolean): void {
+  
     const header = fullDecodedToken && fullDecodedToken.header;
     const payload = fullDecodedToken && fullDecodedToken.payload;
 
     const projectIdMatchMessage = ` Make sure the ${this.tokenInfo.shortName} comes from the same ` +
-      `Firebase project as the service account used to authenticate this SDK.`;
+      'Firebase project as the service account used to authenticate this SDK.';
     const verifyJwtTokenDocsMessage = ` See ${this.tokenInfo.url} ` +
       `for details on how to retrieve ${this.shortNameArticle} ${this.tokenInfo.shortName}.`;
 
     let errorMessage: string | undefined;
-    if (!fullDecodedToken) {
-      errorMessage = `Decoding ${this.tokenInfo.jwtName} failed. Make sure you passed the entire string JWT ` +
-        `which represents ${this.shortNameArticle} ${this.tokenInfo.shortName}.` + verifyJwtTokenDocsMessage;
-    } else if (typeof header.kid === 'undefined') {
+    if (!isEmulator && typeof header.kid === 'undefined') {
       const isCustomToken = (payload.aud === FIREBASE_AUDIENCE);
       const isLegacyCustomToken = (header.alg === 'HS256' && payload.v === 0 && 'd' in payload && 'uid' in payload.d);
 
@@ -190,17 +230,17 @@ export class FirebaseTokenVerifier {
       }
 
       errorMessage += verifyJwtTokenDocsMessage;
-    } else if (header.alg !== this.algorithm) {
-      errorMessage = `${this.tokenInfo.jwtName} has incorrect algorithm. Expected "` + this.algorithm + `" but got ` +
-        `"` + header.alg + `".` + verifyJwtTokenDocsMessage;
+    } else if (!isEmulator && header.alg !== ALGORITHM_RS256) {
+      errorMessage = `${this.tokenInfo.jwtName} has incorrect algorithm. Expected "` + ALGORITHM_RS256 + '" but got ' +
+        '"' + header.alg + '".' + verifyJwtTokenDocsMessage;
     } else if (payload.aud !== projectId) {
       errorMessage = `${this.tokenInfo.jwtName} has incorrect "aud" (audience) claim. Expected "` +
-        projectId + `" but got "` + payload.aud + `".` + projectIdMatchMessage +
+        projectId + '" but got "' + payload.aud + '".' + projectIdMatchMessage +
         verifyJwtTokenDocsMessage;
     } else if (payload.iss !== this.issuer + projectId) {
       errorMessage = `${this.tokenInfo.jwtName} has incorrect "iss" (issuer) claim. Expected ` +
-        `"${this.issuer}"` + projectId + `" but got "` +
-        payload.iss + `".` + projectIdMatchMessage + verifyJwtTokenDocsMessage;
+        `"${this.issuer}` + projectId + '" but got "' +
+        payload.iss + '".' + projectIdMatchMessage + verifyJwtTokenDocsMessage;
     } else if (typeof payload.sub !== 'string') {
       errorMessage = `${this.tokenInfo.jwtName} has no "sub" (subject) claim.` + verifyJwtTokenDocsMessage;
     } else if (payload.sub === '') {
@@ -210,155 +250,72 @@ export class FirebaseTokenVerifier {
         verifyJwtTokenDocsMessage;
     }
     if (errorMessage) {
-      return Promise.reject(new FirebaseAuthError(AuthClientErrorCode.INVALID_ARGUMENT, errorMessage));
+      throw new FirebaseAuthError(AuthClientErrorCode.INVALID_ARGUMENT, errorMessage);
     }
+  }
 
-    return this.fetchPublicKeys().then((publicKeys) => {
-      if (!Object.prototype.hasOwnProperty.call(publicKeys, header.kid)) {
-        return Promise.reject(
-          new FirebaseAuthError(
-            AuthClientErrorCode.INVALID_ARGUMENT,
-            `${this.tokenInfo.jwtName} has "kid" claim which does not correspond to a known public key. ` +
-            `Most likely the ${this.tokenInfo.shortName} is expired, so get a fresh token from your ` +
-            `client app and try again.`,
-          ),
-        );
-      } else {
-        return this.verifyJwtSignatureWithKey(jwtToken, publicKeys[header.kid]);
-      }
-
-    });
+  private verifySignature(jwtToken: string, isEmulator: boolean):
+    Promise<void> {
+    const verifier = isEmulator ? EMULATOR_VERIFIER : this.signatureVerifier;
+    return verifier.verify(jwtToken)
+      .catch((error) => {
+        throw this.mapJwtErrorToAuthError(error);
+      });
   }
 
   /**
-   * Verifies the JWT signature using the provided public key.
-   * @param {string} jwtToken The JWT token to verify.
-   * @param {string} publicKey The public key certificate.
-   * @return {Promise<DecodedIdToken>} A promise that resolves with the decoded JWT claims on successful
-   *     verification.
+   * Maps JwtError to FirebaseAuthError
+   * 
+   * @param error JwtError to be mapped.
+   * @returns FirebaseAuthError or Error instance.
    */
-  private verifyJwtSignatureWithKey(jwtToken: string, publicKey: string): Promise<DecodedIdToken> {
+  private mapJwtErrorToAuthError(error: JwtError): Error {
     const verifyJwtTokenDocsMessage = ` See ${this.tokenInfo.url} ` +
       `for details on how to retrieve ${this.shortNameArticle} ${this.tokenInfo.shortName}.`;
-    return new Promise((resolve, reject) => {
-      jwt.verify(jwtToken, publicKey, {
-        algorithms: [this.algorithm],
-      }, (error: jwt.VerifyErrors, decodedToken: string | object) => {
-        if (error) {
-          if (error.name === 'TokenExpiredError') {
-            const errorMessage = `${this.tokenInfo.jwtName} has expired. Get a fresh ${this.tokenInfo.shortName}` +
-              ` from your client app and try again (auth/${this.tokenInfo.expiredErrorCode.code}).` +
-              verifyJwtTokenDocsMessage;
-            return reject(new FirebaseAuthError(this.tokenInfo.expiredErrorCode, errorMessage));
-          } else if (error.name === 'JsonWebTokenError') {
-            const errorMessage = `${this.tokenInfo.jwtName} has invalid signature.` + verifyJwtTokenDocsMessage;
-            return reject(new FirebaseAuthError(AuthClientErrorCode.INVALID_ARGUMENT, errorMessage));
-          }
-          return reject(new FirebaseAuthError(AuthClientErrorCode.INVALID_ARGUMENT, error.message));
-        } else {
-          // TODO(rsgowman): I think the typing on jwt.verify is wrong. It claims that this can be either a string or an
-          // object, but the code always seems to call it as an object. Investigate and upstream typing changes if this
-          // is actually correct.
-          if (typeof decodedToken === 'string') {
-            return reject(new FirebaseAuthError(
-              AuthClientErrorCode.INTERNAL_ERROR,
-              "Unexpected decodedToken. Expected an object but got a string: '" + decodedToken + "'",
-            ));
-          } else {
-            const decodedIdToken = (decodedToken as DecodedIdToken);
-            decodedIdToken.uid = decodedIdToken.sub;
-            resolve(decodedIdToken);
-          }
-        }
-      });
-    });
-  }
-
-  /**
-   * Fetches the public keys for the Google certs.
-   *
-   * @return {Promise<object>} A promise fulfilled with public keys for the Google certs.
-   */
-  private fetchPublicKeys(): Promise<{[key: string]: string}> {
-    const publicKeysExist = (typeof this.publicKeys !== 'undefined');
-    const publicKeysExpiredExists = (typeof this.publicKeysExpireAt !== 'undefined');
-    const publicKeysStillValid = (publicKeysExpiredExists && Date.now() < this.publicKeysExpireAt);
-    if (publicKeysExist && publicKeysStillValid) {
-      return Promise.resolve(this.publicKeys);
+    if (error.code === JwtErrorCode.TOKEN_EXPIRED) {
+      const errorMessage = `${this.tokenInfo.jwtName} has expired. Get a fresh ${this.tokenInfo.shortName}` +
+        ` from your client app and try again (auth/${this.tokenInfo.expiredErrorCode.code}).` +
+        verifyJwtTokenDocsMessage;
+      return new FirebaseAuthError(this.tokenInfo.expiredErrorCode, errorMessage);
+    } else if (error.code === JwtErrorCode.INVALID_SIGNATURE) {
+      const errorMessage = `${this.tokenInfo.jwtName} has invalid signature.` + verifyJwtTokenDocsMessage;
+      return new FirebaseAuthError(AuthClientErrorCode.INVALID_ARGUMENT, errorMessage);
+    } else if (error.code === JwtErrorCode.NO_MATCHING_KID) {
+      const errorMessage = `${this.tokenInfo.jwtName} has "kid" claim which does not ` +
+        `correspond to a known public key. Most likely the ${this.tokenInfo.shortName} ` +
+        'is expired, so get a fresh token from your client app and try again.';
+      return new FirebaseAuthError(AuthClientErrorCode.INVALID_ARGUMENT, errorMessage);
     }
-
-    const client = new HttpClient();
-    const request: HttpRequestConfig = {
-      method: 'GET',
-      url: this.clientCertUrl,
-      httpAgent: this.app.options.httpAgent,
-    };
-    return client.send(request).then((resp) => {
-      if (!resp.isJson() || resp.data.error) {
-        // Treat all non-json messages and messages with an 'error' field as
-        // error responses.
-        throw new HttpError(resp);
-      }
-      if (Object.prototype.hasOwnProperty.call(resp.headers, 'cache-control')) {
-        const cacheControlHeader: string = resp.headers['cache-control'];
-        const parts = cacheControlHeader.split(',');
-        parts.forEach((part) => {
-          const subParts = part.trim().split('=');
-          if (subParts[0] === 'max-age') {
-            const maxAge: number = +subParts[1];
-            this.publicKeysExpireAt = Date.now() + (maxAge * 1000);
-          }
-        });
-      }
-      this.publicKeys = resp.data;
-      return resp.data;
-    }).catch((err) => {
-      if (err instanceof HttpError) {
-        let errorMessage = 'Error fetching public keys for Google certs: ';
-        const resp = err.response;
-        if (resp.isJson() && resp.data.error) {
-          errorMessage += `${resp.data.error}`;
-          if (resp.data.error_description) {
-            errorMessage += ' (' + resp.data.error_description + ')';
-          }
-        } else {
-          errorMessage += `${resp.text}`;
-        }
-        throw new FirebaseAuthError(AuthClientErrorCode.INTERNAL_ERROR, errorMessage);
-      }
-      throw err;
-    });
+    return new FirebaseAuthError(AuthClientErrorCode.INVALID_ARGUMENT, error.message);
   }
 }
 
 /**
  * Creates a new FirebaseTokenVerifier to verify Firebase ID tokens.
  *
- * @param {FirebaseApp} app Firebase app instance.
- * @return {FirebaseTokenVerifier}
+ * @param app Firebase app instance.
+ * @return FirebaseTokenVerifier
  */
 export function createIdTokenVerifier(app: FirebaseApp): FirebaseTokenVerifier {
   return new FirebaseTokenVerifier(
     CLIENT_CERT_URL,
-    ALGORITHM_RS256,
     'https://securetoken.google.com/',
     ID_TOKEN_INFO,
-    app,
+    app
   );
 }
 
 /**
  * Creates a new FirebaseTokenVerifier to verify Firebase session cookies.
  *
- * @param {FirebaseApp} app Firebase app instance.
- * @return {FirebaseTokenVerifier}
+ * @param app Firebase app instance.
+ * @return FirebaseTokenVerifier
  */
 export function createSessionCookieVerifier(app: FirebaseApp): FirebaseTokenVerifier {
   return new FirebaseTokenVerifier(
     SESSION_COOKIE_CERT_URL,
-    ALGORITHM_RS256,
     'https://session.firebase.google.com/',
     SESSION_COOKIE_INFO,
-    app,
+    app
   );
 }

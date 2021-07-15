@@ -1,4 +1,5 @@
 /*!
+ * @license
  * Copyright 2017 Google Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,7 +15,8 @@
  * limitations under the License.
  */
 
-import {deepCopy} from '../utils/deep-copy';
+import { FirebaseError as FirebaseErrorInterface } from '../firebase-namespace-api';
+import { deepCopy } from '../utils/deep-copy';
 
 /**
  * Defines error info type. This includes a code and message string.
@@ -22,11 +24,6 @@ import {deepCopy} from '../utils/deep-copy';
 export interface ErrorInfo {
   code: string;
   message: string;
-}
-
-export interface FirebaseArrayIndexError {
-  index: number;
-  error: FirebaseError;
 }
 
 /**
@@ -42,7 +39,7 @@ interface ServerToClientCode {
  * @param {ErrorInfo} errorInfo The error information (code and message).
  * @constructor
  */
-export class FirebaseError extends Error {
+export class FirebaseError extends Error implements FirebaseErrorInterface {
   constructor(private errorInfo: ErrorInfo) {
     super(errorInfo.message);
 
@@ -196,7 +193,7 @@ export class FirebaseAuthError extends PrefixedFirebaseError {
 export class FirebaseDatabaseError extends FirebaseError {
   constructor(info: ErrorInfo, message?: string) {
     // Override default message if custom message provided.
-    super({code: 'database/' + info.code, message: message || info.message});
+    super({ code: 'database/' + info.code, message: message || info.message });
   }
 }
 
@@ -211,7 +208,7 @@ export class FirebaseDatabaseError extends FirebaseError {
 export class FirebaseFirestoreError extends FirebaseError {
   constructor(info: ErrorInfo, message?: string) {
     // Override default message if custom message provided.
-    super({code: 'firestore/' + info.code, message: message || info.message});
+    super({ code: 'firestore/' + info.code, message: message || info.message });
   }
 }
 
@@ -226,7 +223,24 @@ export class FirebaseFirestoreError extends FirebaseError {
 export class FirebaseInstanceIdError extends FirebaseError {
   constructor(info: ErrorInfo, message?: string) {
     // Override default message if custom message provided.
-    super({code: 'instance-id/' + info.code, message: message || info.message});
+    super({ code: 'instance-id/' + info.code, message: message || info.message });
+    (this as any).__proto__ = FirebaseInstanceIdError.prototype;
+  }
+}
+
+/**
+ * Firebase Installations service error code structure. This extends `FirebaseError`.
+ *
+ * @param info The error code info.
+ * @param message The error message. This will override the default
+ *     message if provided.
+ * @constructor
+ */
+export class FirebaseInstallationsError extends FirebaseError {
+  constructor(info: ErrorInfo, message?: string) {
+    // Override default message if custom message provided.
+    super({ code: 'installations/' + info.code, message: message || info.message });
+    (this as any).__proto__ = FirebaseInstallationsError.prototype;
   }
 }
 
@@ -377,6 +391,10 @@ export class AuthClientErrorCode {
     code: 'email-already-exists',
     message: 'The email address is already in use by another account.',
   };
+  public static EMAIL_NOT_FOUND = {
+    code: 'email-not-found',
+    message: 'There is no user record corresponding to the provided email.',
+  };
   public static FORBIDDEN_CLAIM = {
     code: 'reserved-claim',
     message: 'The specified developer claim is reserved and cannot be specified.',
@@ -520,6 +538,14 @@ export class AuthClientErrorCode {
     code: 'invalid-provider-id',
     message: 'The providerId must be a valid supported provider identifier string.',
   };
+  public static INVALID_PROVIDER_UID = {
+    code: 'invalid-provider-uid',
+    message: 'The providerUid must be a valid provider uid string.',
+  };
+  public static INVALID_OAUTH_RESPONSETYPE = {
+    code: 'invalid-oauth-responsetype',
+    message: 'Only exactly one OAuth responseType should be set to true.',
+  };
   public static INVALID_SESSION_COOKIE_DURATION = {
     code: 'invalid-session-cookie-duration',
     message: 'The session cookie duration must be a valid number in milliseconds ' +
@@ -532,6 +558,10 @@ export class AuthClientErrorCode {
   public static INVALID_TENANT_TYPE = {
     code: 'invalid-tenant-type',
     message: 'Tenant type must be either "full_service" or "lightweight".',
+  };
+  public static INVALID_TESTING_PHONE_NUMBER = {
+    code: 'invalid-testing-phone-number',
+    message: 'Invalid testing phone number or invalid test code provided.',
   };
   public static INVALID_UID = {
     code: 'invalid-uid',
@@ -588,6 +618,10 @@ export class AuthClientErrorCode {
     code: 'missing-oauth-client-id',
     message: 'The OAuth/OIDC configuration client ID must not be empty.',
   };
+  public static MISSING_OAUTH_CLIENT_SECRET = {
+    code: 'missing-oauth-client-secret',
+    message: 'The OAuth configuration client secret is required to enable OIDC code flow.',
+  };
   public static MISSING_PROVIDER_ID = {
     code: 'missing-provider-id',
     message: 'A valid provider ID must be provided in the request.',
@@ -595,6 +629,10 @@ export class AuthClientErrorCode {
   public static MISSING_SAML_RELYING_PARTY_CONFIG = {
     code: 'missing-saml-relying-party-config',
     message: 'The SAML configuration provided is missing a relying party configuration.',
+  };
+  public static MAXIMUM_TEST_PHONE_NUMBER_EXCEEDED = {
+    code: 'test-phone-number-limit-exceeded',
+    message: 'The maximum allowed number of test phone number / code pairs has been exceeded.',
   };
   public static MAXIMUM_USER_COUNT_EXCEEDED = {
     code: 'maximum-user-count-exceeded',
@@ -682,6 +720,10 @@ export class AuthClientErrorCode {
   public static NOT_FOUND = {
     code: 'not-found',
     message: 'The requested resource was not found.',
+  };
+  public static USER_NOT_DISABLED = {
+    code: 'user-not-disabled',
+    message: 'The user must be disabled in order to bulk delete it (or you must pass force=true).',
   };
 }
 
@@ -783,7 +825,7 @@ export class MessagingClientErrorCode {
   };
 }
 
-export class InstanceIdClientErrorCode {
+export class InstallationsClientErrorCode {
   public static INVALID_ARGUMENT = {
     code: 'invalid-argument',
     message: 'Invalid argument provided.',
@@ -792,13 +834,20 @@ export class InstanceIdClientErrorCode {
     code: 'invalid-project-id',
     message: 'Invalid project ID provided.',
   };
-  public static INVALID_INSTANCE_ID = {
-    code: 'invalid-instance-id',
-    message: 'Invalid instance ID provided.',
+  public static INVALID_INSTALLATION_ID = {
+    code: 'invalid-installation-id',
+    message: 'Invalid installation ID provided.',
   };
   public static API_ERROR = {
     code: 'api-error',
-    message: 'Instance ID API call failed.',
+    message: 'Installation ID API call failed.',
+  };
+}
+
+export class InstanceIdClientErrorCode extends InstallationsClientErrorCode {
+  public static INVALID_INSTANCE_ID = {
+    code: 'invalid-instance-id',
+    message: 'Invalid instance ID provided.',
   };
 }
 
@@ -841,6 +890,8 @@ const AUTH_SERVER_TO_CLIENT_CODE: ServerToClientCode = {
   DUPLICATE_MFA_ENROLLMENT_ID: 'SECOND_FACTOR_UID_ALREADY_EXISTS',
   // setAccountInfo email already exists.
   EMAIL_EXISTS: 'EMAIL_ALREADY_EXISTS',
+  // /accounts:sendOobCode for password reset when user is not found.
+  EMAIL_NOT_FOUND: 'EMAIL_NOT_FOUND',
   // Reserved claim name.
   FORBIDDEN_CLAIM: 'FORBIDDEN_CLAIM',
   // Invalid claims provided.
@@ -867,6 +918,8 @@ const AUTH_SERVER_TO_CLIENT_CODE: ServerToClientCode = {
   INVALID_PROVIDER_ID: 'INVALID_PROVIDER_ID',
   // Invalid service account.
   INVALID_SERVICE_ACCOUNT: 'INVALID_SERVICE_ACCOUNT',
+  // Invalid testing phone number.
+  INVALID_TESTING_PHONE_NUMBER: 'INVALID_TESTING_PHONE_NUMBER',
   // Invalid tenant type.
   INVALID_TENANT_TYPE: 'INVALID_TENANT_TYPE',
   // Missing Android package name.

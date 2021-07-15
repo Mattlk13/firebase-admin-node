@@ -26,6 +26,6 @@ describe('admin.instanceId', () => {
     // instance ids have to conform to /[cdef][A-Za-z0-9_-]{9}[AEIMQUYcgkosw048]/
     return admin.instanceId().deleteInstanceId('fictive-ID0')
       .should.eventually.be
-      .rejectedWith('Instance ID "fictive-ID0": Failed to find the instance ID.');
+      .rejectedWith('Installation ID "fictive-ID0": Failed to find the installation ID.');
   });
 });
